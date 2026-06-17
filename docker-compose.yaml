@@ -5,6 +5,6 @@ services:
       - 8080:8080
     volumes:
       - ./dags:/opt/airflow/dags
-      - ./data:/opt/airflow/data
+      - ./task-outputs/:/opt/airflow/task-outputs
     command: standalone
 
