@@ -56,7 +56,7 @@ helm version
 
 ## Step 1 — Start Minikube with enough resources
 
-Airflow needs more headroom than the defaults. Give it:
+Airflow needs more headroom than the defaults. Run these commands from the root of your repository:
 
 ```bash
 colima start --cpu 4 --memory 6 --disk 60
@@ -118,9 +118,9 @@ That file shows every configurable option. You don't need to touch most of it ye
 ## Step 4 — Create your values file
 
 Instead of modifying the default chart values directly, you override only what you need
-in your own `values.yaml`. Create this file in your project root:
+in your own `values.yaml`. Create this file inside the `pipelines/` directory:
 
-**`airflow-values.yaml`**
+**`pipelines/k8s/airflow-values.yaml`**
 ```yaml
 # Use the KubernetesExecutor so each task runs as its own pod
 # This is the production-standard executor for cloud deployments
@@ -237,7 +237,7 @@ if __name__ == "__main__":
 
 ## Step 8 — Write the Dockerfile for task pods
 
-Create `Dockerfile.task-runner` in your project root:
+Create `pipelines/k8s/Dockerfile.task-runner`:
 
 ```dockerfile
 FROM python:3.12-slim
@@ -246,7 +246,8 @@ WORKDIR /app
 
 RUN pip install faker duckdb
 
-COPY scripts/ ./scripts/
+# Assuming we build from the 'pipelines' directory as context
+COPY k8s/scripts/ ./scripts/
 
 ENTRYPOINT ["python", "scripts/run_task.py"]
 ```
@@ -258,14 +259,14 @@ ENTRYPOINT ["python", "scripts/run_task.py"]
 Your tasks run as pods, so they need a Docker image that Minikube can access.
 
 Build the image **inside Minikube's Docker daemon** so it's immediately available
-without needing a registry:
+without needing a registry. Run this from inside the `pipelines/` directory:
 
 ```bash
 # Point your shell's Docker CLI at Minikube's internal Docker daemon
 eval $(minikube docker-env)
 
-# Build the image (now it lives inside Minikube, not your laptop's Docker)
-docker build -t data-pipeline-task-runner:latest -f Dockerfile.task-runner .
+# Build the image (now it lives inside Minikube)
+docker build -t data-pipeline-task-runner:latest -f k8s/Dockerfile.task-runner .
 ```
 
 Verify the image is there:
@@ -280,10 +281,7 @@ docker images | grep data-pipeline-task-runner
 
 ## Step 10 — Set up shared storage between task pods
 
-Two tasks need to share a CSV file. On GKE you'd use a PersistentVolumeClaim backed
-by a cloud disk. Locally, you'll use a `hostPath` volume (Minikube's node filesystem).
-
-Create `k8s/task-pvc.yaml`:
+Two tasks need to share a CSV file. Create `pipelines/k8s/task-pvc.yaml`:
 ```yaml
 apiVersion: v1
 kind: PersistentVolume
@@ -396,7 +394,7 @@ with DAG(
 The Helm chart already mounts an `airflow-dags` PVC into the **dag-processor** pod.
 The scheduler pod does NOT mount this PVC — it gets DAG info from the database.
 
-So you must copy the DAG file to both the scheduler AND the dag-processor:
+So you must copy the DAG file to both the scheduler AND the dag-processor (run these from the `pipelines/` directory):
 
 ```bash
 # Copy to the scheduler (for manual `airflow dags reserialize`)
