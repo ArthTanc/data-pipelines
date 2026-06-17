@@ -41,7 +41,7 @@ def _generate_and_save_data(**context):
     output_filepath = context["params"]["output_filepath"]
     print(f"Saving data to {output_filepath}")
 
-    with open(output_filepath, 'w', newline='') as file:
+    with open(output_filepath, "w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=data[0].keys())
         writer.writeheader()
         writer.writerows(data)
@@ -86,7 +86,7 @@ def _calculate_salary_metrics_duckdb(**context):
         avg_salary_by_position_sex = duckdb.sql(
             f"SELECT position, sex, AVG(salary) as average_salary "
             f"FROM '{input_filepath}' "
-            'GROUP BY position, sex '
+            "GROUP BY position, sex "
             "ORDER BY position, sex"
         )
     except FileNotFoundError:
@@ -134,6 +134,5 @@ with DAG(
             "output_filepath": METRICS_FILE,
         },
     )
-
 
     generate_data_task >> duckdb_calculate_metrics_task

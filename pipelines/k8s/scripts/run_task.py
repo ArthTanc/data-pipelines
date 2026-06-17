@@ -8,7 +8,6 @@ def generate_and_save_data(output_filepath):
 
     from faker import Faker
 
-
     fake = Faker()
     num_records = 1000
     data = []
@@ -28,7 +27,7 @@ def generate_and_save_data(output_filepath):
 
     print(f"Saving data to {output_filepath}")
 
-    with open(output_filepath, 'w', newline='') as file:
+    with open(output_filepath, "w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=data[0].keys())
         writer.writeheader()
         writer.writerows(data)
@@ -36,16 +35,16 @@ def generate_and_save_data(output_filepath):
     print("Data generation complete.")
 
 
-
 def calculate_salary_metrics_duckdb(input_filepath, output_filepath):
     """Calculates salary metrics by position and sex."""
     import duckdb
+
     print(f"Reading data from {input_filepath}")
     try:
         avg_salary_by_position_sex = duckdb.sql(
             f"SELECT position, sex, AVG(salary) as average_salary "
             f"FROM '{input_filepath}' "
-            'GROUP BY position, sex '
+            "GROUP BY position, sex "
             "ORDER BY position, sex"
         )
     except FileNotFoundError:
@@ -56,22 +55,20 @@ def calculate_salary_metrics_duckdb(input_filepath, output_filepath):
     print("Metrics calculation complete.")
 
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(dest='command')
-    
+    subparsers = parser.add_subparsers(dest="command")
+
     gen = subparsers.add_parser("generate-data")
-    gen.add_argument('--output', required=True)
+    gen.add_argument("--output", required=True)
 
     calc = subparsers.add_parser("calculate-metrics")
-    calc.add_argument('--input', required=True)
-    calc.add_argument('--output', required=True)
+    calc.add_argument("--input", required=True)
+    calc.add_argument("--output", required=True)
 
     args = parser.parse_args()
-    
+
     if args.command == "generate-data":
         generate_and_save_data(args.output)
     elif args.command == "calculate-metrics":
         calculate_salary_metrics_duckdb(args.input, args.output)
-

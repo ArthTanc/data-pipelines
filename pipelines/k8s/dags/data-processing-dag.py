@@ -2,11 +2,17 @@ import datetime
 
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.sdk import DAG
-from kubernetes.client import V1Volume, V1VolumeMount, V1PersistentVolumeClaimVolumeSource
+from kubernetes.client import (
+    V1Volume,
+    V1VolumeMount,
+    V1PersistentVolumeClaimVolumeSource,
+)
 
 SHARED_VOLUME = V1Volume(
     name="task-outputs",
-    persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(claim_name="task-outputs-pvc"),
+    persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
+        claim_name="task-outputs-pvc"
+    ),
 )
 
 SHARED_MOUNT = V1VolumeMount(
@@ -21,7 +27,6 @@ with DAG(
     catchup=False,
     tags=["data-processing", "fake-data", "metrics"],
 ) as dag:
-
     generate_data = KubernetesPodOperator(
         task_id="generate_fake_employee_data",
         namespace="airflow",
@@ -42,8 +47,10 @@ with DAG(
         image_pull_policy="Never",
         arguments=[
             "calculate-metrics",
-            "--input", "/data/task-outputs/employees.csv",
-            "--output", "/data/task-outputs/metrics.csv",
+            "--input",
+            "/data/task-outputs/employees.csv",
+            "--output",
+            "/data/task-outputs/metrics.csv",
         ],
         name="calculate-metrics",
         volumes=[SHARED_VOLUME],
