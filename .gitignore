@@ -87,3 +87,6 @@ venv.bak/
 
 ### Project Related
 task-outputs/
+
+# Jujutsu
+.jj
