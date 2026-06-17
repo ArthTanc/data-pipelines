@@ -11,13 +11,15 @@ Your laptop
             │
             ▼
       Minikube Cluster
-            ├── Namespace: airflow
-            │       ├── airflow-webserver  (pod)
-            │       ├── airflow-scheduler  (pod)
-            │       ├── airflow-postgresql (pod)
-            │       └── airflow-worker     (pod, spawned per task)
-            └── Namespace: default
-                    └── your task pods (spawned by the scheduler)
+├── Namespace: airflow
+│       ├── airflow-api-server     (pod)
+│       ├── airflow-scheduler      (pod)
+│       ├── airflow-dag-processor  (pod)
+│       ├── airflow-triggerer      (pod)
+│       ├── airflow-postgresql     (pod)
+│       └── your task pods         (spawned by the KubernetesExecutor)
+└── Namespace: default
+        └── (no workloads — everything lives in airflow)
 ```
 
 Tools you'll use:
@@ -57,11 +59,12 @@ helm version
 Airflow needs more headroom than the defaults. Give it:
 
 ```bash
-minikube start \
-  --cpus=4 \
-  --memory=8192 \
-  --disk-size=20g
+colima start --cpu 4 --memory 6 --disk 60
+minikube start --cpus=4 --memory=4096 --disk-size=20g
 ```
+
+> **Note:** If you previously started with less memory, `minikube delete` and recreate —
+> you can't change memory on an existing cluster.
 
 Confirm it's running:
 ```bash
@@ -179,8 +182,10 @@ kubectl logs <pod-name> -n airflow
 Kubernetes doesn't expose services to your laptop by default. Use port-forwarding:
 
 ```bash
-kubectl port-forward svc/airflow-webserver 8080:8080 -n airflow
+kubectl port-forward deploy/airflow-api-server 8080:8080 -n airflow
 ```
+
+> Airflow 3.x uses `airflow-api-server` instead of the old `airflow-webserver`.
 
 Now open: **http://localhost:8080**
 
@@ -194,36 +199,7 @@ Default credentials:
 
 ---
 
-## Step 7 — Build and load your task runner image
-
-Your tasks run as pods, so they need a Docker image that Minikube can access.
-
-Build the image **inside Minikube's Docker daemon** so it's immediately available
-without needing a registry:
-
-```bash
-# Point your shell's Docker CLI at Minikube's internal Docker daemon
-eval $(minikube docker-env)
-
-# Build the image (now it lives inside Minikube, not your laptop's Docker)
-docker build -t data-pipeline-task-runner:latest -f Dockerfile.task-runner .
-```
-
-Verify the image is there:
-```bash
-docker images | grep data-pipeline-task-runner
-```
-
-> **Important:** Any terminal tab that hasn't run `eval $(minikube docker-env)` is
-> still talking to your laptop's Docker. Run it in every new tab where you build images.
-
-> **Why this matters on GKE:** On a real cluster you'd push to a registry
-> (Google Artifact Registry, DockerHub, etc.) and reference it by URL.
-> The `eval` trick is the local shortcut that skips that step.
-
----
-
-## Step 8 — Write the `run_task.py` script
+## Step 7 — Write the `run_task.py` script
 
 This is the entrypoint your pods will execute. Create `scripts/run_task.py`:
 
@@ -259,9 +235,10 @@ if __name__ == "__main__":
 
 ---
 
-## Step 9 — Write the Dockerfile for task pods
+## Step 8 — Write the Dockerfile for task pods
 
-**`Dockerfile.task-runner`**
+Create `Dockerfile.task-runner` in your project root:
+
 ```dockerfile
 FROM python:3.12-slim
 
@@ -274,11 +251,30 @@ COPY scripts/ ./scripts/
 ENTRYPOINT ["python", "scripts/run_task.py"]
 ```
 
-Rebuild after any changes:
+---
+
+## Step 9 — Build and load your task runner image
+
+Your tasks run as pods, so they need a Docker image that Minikube can access.
+
+Build the image **inside Minikube's Docker daemon** so it's immediately available
+without needing a registry:
+
 ```bash
+# Point your shell's Docker CLI at Minikube's internal Docker daemon
 eval $(minikube docker-env)
+
+# Build the image (now it lives inside Minikube, not your laptop's Docker)
 docker build -t data-pipeline-task-runner:latest -f Dockerfile.task-runner .
 ```
+
+Verify the image is there:
+```bash
+docker images | grep data-pipeline-task-runner
+```
+
+> **Important:** Any terminal tab that hasn't run `eval $(minikube docker-env)` is
+> still talking to your laptop's Docker. Run it in every new tab where you build images.
 
 ---
 
@@ -332,77 +328,96 @@ Replace `PythonOperator` with `KubernetesPodOperator`.
 
 **`dags/data-processing-dag.py`**
 ```python
-from datetime import datetime
-from airflow import DAG
+import datetime
+
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
+from airflow.sdk import DAG
 from kubernetes.client import V1Volume, V1VolumeMount, V1PersistentVolumeClaimVolumeSource
 
 SHARED_VOLUME = V1Volume(
     name="task-outputs",
-    persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(claim_name="task-outputs-pvc")
+    persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(claim_name="task-outputs-pvc"),
 )
 
 SHARED_MOUNT = V1VolumeMount(
     name="task-outputs",
-    mount_path="/data/task-outputs"
+    mount_path="/data/task-outputs",
 )
 
 with DAG(
-    dag_id="data_processing",
-    start_date=datetime(2024, 1, 1),
+    dag_id="data_processing_pipeline",
+    start_date=datetime.datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
+    tags=["data-processing", "fake-data", "metrics"],
 ) as dag:
 
     generate_data = KubernetesPodOperator(
         task_id="generate_fake_employee_data",
-        namespace="default",
+        namespace="airflow",
         image="data-pipeline-task-runner:latest",
-        image_pull_policy="Never",       # use local image, don't pull from DockerHub
+        image_pull_policy="Never",
         arguments=["generate-data", "--output", "/data/task-outputs/employees.csv"],
         name="generate-data",
         volumes=[SHARED_VOLUME],
         volume_mounts=[SHARED_MOUNT],
-        is_delete_operator_pod=True,
+        is_delete_operator_pod=False,
         get_logs=True,
     )
 
     calculate_metrics = KubernetesPodOperator(
         task_id="calculate_salary_metrics",
-        namespace="default",
+        namespace="airflow",
         image="data-pipeline-task-runner:latest",
         image_pull_policy="Never",
         arguments=[
             "calculate-metrics",
             "--input", "/data/task-outputs/employees.csv",
-            "--output", "/data/task-outputs/metrics.csv"
+            "--output", "/data/task-outputs/metrics.csv",
         ],
         name="calculate-metrics",
         volumes=[SHARED_VOLUME],
         volume_mounts=[SHARED_MOUNT],
-        is_delete_operator_pod=True,
+        is_delete_operator_pod=False,
         get_logs=True,
     )
 
     generate_data >> calculate_metrics
 ```
 
+> **Airflow 3.x differences:** Import `DAG` from `airflow.sdk` (not `airflow`),
+> task pods run in the `airflow` namespace (not `default`), and the `dag_id`
+> in the DAG definition must match the filename's dag_id.
+
 ---
 
 ## Step 12 — Load your DAG into Airflow
 
-The simplest way during development: copy the DAG file directly into the running pod.
+The Helm chart already mounts an `airflow-dags` PVC into the **dag-processor** pod.
+The scheduler pod does NOT mount this PVC — it gets DAG info from the database.
+
+So you must copy the DAG file to both the scheduler AND the dag-processor:
 
 ```bash
-# Find the scheduler pod name
-kubectl get pods -n airflow | grep scheduler
-
-# Copy the DAG in
+# Copy to the scheduler (for manual `airflow dags reserialize`)
 kubectl cp dags/data-processing-dag.py \
-  airflow/<scheduler-pod-name>:/opt/airflow/dags/data-processing-dag.py
+  airflow/<scheduler-pod>:/opt/airflow/dags/data-processing-dag.py \
+  -c scheduler
+
+# Copy to the dag-processor (for automated DAG parsing)
+cat dags/data-processing-dag.py | kubectl exec -n airflow \
+  deploy/airflow-dag-processor -c dag-processor -i -- \
+  bash -c 'cat > /opt/airflow/dags/data-processing-dag.py'
 ```
 
-Wait ~30 seconds for the scheduler to detect it, then refresh the Airflow UI.
+After copying, force Airflow to re-serialize the DAG:
+
+```bash
+kubectl exec -n airflow deploy/airflow-scheduler -c scheduler \
+  -- airflow dags reserialize
+```
+
+Then refresh the UI. The DAG should appear within a few seconds.
 
 > **Better long-term approach:** Mount a PersistentVolume to `/opt/airflow/dags`
 > and sync your DAG files there. On GKE you'd use Git-sync (a sidecar container
@@ -415,7 +430,7 @@ Wait ~30 seconds for the scheduler to detect it, then refresh the Airflow UI.
 Trigger the DAG from the UI, then watch the pods appear and disappear in real time:
 
 ```bash
-kubectl get pods -n default --watch
+kubectl get pods -n airflow --watch
 ```
 
 You should see your task pods spin up, run, and terminate. That's the
@@ -423,7 +438,7 @@ KubernetesExecutor in action — ephemeral pods, one per task.
 
 Check task logs directly:
 ```bash
-kubectl logs <task-pod-name> -n default
+kubectl logs -n airflow -l task_id=<task_id> --tail 50
 ```
 
 ---

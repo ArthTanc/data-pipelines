@@ -19,6 +19,7 @@ exclude = ["dags*", "logs*"]
 [dependency-groups]
 dev = [
   "apache-airflow>=3.2.2",
+  "apache-airflow-providers-cncf-kubernetes",
   "ipython>=9.14.1",
   "ruff>=0.15.17",
 ]

@@ -1,0 +1,6 @@
+executor: KubernetesExecutor
+
+dags:
+  persistence:
+    enabled: true
+    size: 1Gi
