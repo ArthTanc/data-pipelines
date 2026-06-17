@@ -8,7 +8,13 @@ name = "my-airflow-project"
 version = "0.1.0"
 description = "A sample project using Airflow"
 dependencies = [
-    "apache-airflow>=3.2.2"
+  "faker>=40.21.0",
+  "polars>=1.41.2",
+]
+
+[dependency-groups]
+dev = [
+  "apache-airflow>=3.2.2",
 ]
 
 [project.urls]
