@@ -1,4 +1,3 @@
-
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
@@ -20,6 +19,7 @@ exclude = ["dags*", "logs*"]
 dev = [
   "apache-airflow>=3.2.2",
   "apache-airflow-providers-cncf-kubernetes",
+  "ipykernel>=7.3.0",
   "ipython>=9.14.1",
   "ruff>=0.15.17",
 ]
