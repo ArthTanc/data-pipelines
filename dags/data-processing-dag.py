@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import csv
 import datetime
 import os
 import random
 
-import polars as pl
-from airflow.sdk import DAG
+import duckdb
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import DAG
 from faker import Faker
 
 # Define file paths
@@ -15,12 +16,9 @@ DATA_DIR = os.path.join(BASE_DIR, "task-outputs")
 RAW_DATA_FILE = os.path.join(DATA_DIR, "fake_employee_data.csv")
 METRICS_FILE = os.path.join(DATA_DIR, "salary_metrics.csv")
 
-# Ensure directories exist
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)  # exist_ok avoids the if-check
 
 
-# --- Task 1: Generate Fake Data ---
 def _generate_and_save_data(**context):
     """Generates fake data and saves it to a CSV file."""
     fake = Faker()
@@ -40,38 +38,66 @@ def _generate_and_save_data(**context):
             }
         )
 
-    df = pl.DataFrame(data)
     output_filepath = context["params"]["output_filepath"]
     print(f"Saving data to {output_filepath}")
-    df.write_csv(output_filepath)
+
+    with open(output_filepath, 'w', newline='') as file:
+        writer = csv.DictWriter(file, fieldnames=data[0].keys())
+        writer.writeheader()
+        writer.writerows(data)
+
     print("Data generation complete.")
 
 
-# --- Task 2: Calculate Metrics ---
-def _calculate_salary_metrics(**context):
+# def _calculate_salary_metrics_polars(**context):
+#     """Calculates salary metrics by position and sex."""
+#     input_filepath = context["params"]["input_filepath"]
+#     output_filepath = context["params"]["output_filepath"]
+#
+#     print(f"Reading data from {input_filepath}")
+#     try:
+#         df = pl.scan_csv(input_filepath)
+#     except FileNotFoundError:
+#         print(f"Error: Input file not found at {input_filepath}")
+#         raise  # Raise the exception to fail the task
+#
+#     print(df.collect_schema())
+#     print("Calculating salary metrics by position and sex...")
+#
+#     # Calculate average salary by position and sex
+#     avg_salary_by_position_sex = (
+#         df.group_by(["position", "sex"])
+#         .agg(pl.mean("salary").alias("average_salary"))
+#         .sort(["position", "sex"])
+#     )
+#
+#     print(f"Saving metrics to {output_filepath}")
+#     avg_salary_by_position_sex.sink_csv(output_filepath)
+#     print("Metrics calculation complete.")
+
+
+def _calculate_salary_metrics_duckdb(**context):
     """Calculates salary metrics by position and sex."""
     input_filepath = context["params"]["input_filepath"]
     output_filepath = context["params"]["output_filepath"]
 
     print(f"Reading data from {input_filepath}")
     try:
-        df = pl.scan_csv(input_filepath)
+        rel = duckdb.read_csv(input_filepath)
     except FileNotFoundError:
         print(f"Error: Input file not found at {input_filepath}")
         raise  # Raise the exception to fail the task
 
-    print(df.collect_schema())
-    print("Calculating salary metrics by position and sex...")
-
     # Calculate average salary by position and sex
     avg_salary_by_position_sex = (
-        df.group_by(["position", "sex"])
-        .agg(pl.mean("salary").alias("average_salary"))
-        .sort(["position", "sex"])
+        rel.aggregate(
+            'position, sex, AVG(salary) as average_salary'
+        ).order('position', 'sex')
+
     )
 
     print(f"Saving metrics to {output_filepath}")
-    avg_salary_by_position_sex.sink_csv(output_filepath)
+    avg_salary_by_position_sex.write_csv(output_filepath)
     print("Metrics calculation complete.")
 
 
@@ -94,13 +120,23 @@ with DAG(
         params={"output_filepath": RAW_DATA_FILE},
     )
 
-    calculate_metrics_task = PythonOperator(
+    # polars_calculate_metrics_task = PythonOperator(
+    #     task_id="calculate_salary_metrics",
+    #     python_callable=_calculate_salary_metrics_polars,
+    #     params={
+    #         "input_filepath": RAW_DATA_FILE,
+    #         "output_filepath": METRICS_FILE,
+    #     },
+    # )
+
+    duckdb_calculate_metrics_task = PythonOperator(
         task_id="calculate_salary_metrics",
-        python_callable=_calculate_salary_metrics,
+        python_callable=_calculate_salary_metrics_duckdb,
         params={
             "input_filepath": RAW_DATA_FILE,
             "output_filepath": METRICS_FILE,
         },
     )
 
-    generate_data_task >> calculate_metrics_task
+
+    generate_data_task >> duckdb_calculate_metrics_task
