@@ -1,116 +1,458 @@
-# Plan: Run Airflow DAG Tasks on Minikube via KubernetesPodOperator
+# Deploying Airflow on Minikube (Local GKE Simulation)
 
-## Overview
+## What you're building
 
-Airflow runs in Docker (existing setup), tasks execute as Kubernetes pods in Minikube.
+Airflow running entirely inside Minikube, the same way it would run on GKE.
+No Docker Compose. No hybrid setup. Just Kubernetes.
+
+```
+Your laptop
+    └── kubectl / browser (port-forwarded)
+            │
+            ▼
+      Minikube Cluster
+            ├── Namespace: airflow
+            │       ├── airflow-webserver  (pod)
+            │       ├── airflow-scheduler  (pod)
+            │       ├── airflow-postgresql (pod)
+            │       └── airflow-worker     (pod, spawned per task)
+            └── Namespace: default
+                    └── your task pods (spawned by the scheduler)
+```
+
+Tools you'll use:
+- **Minikube** — local Kubernetes cluster
+- **Helm** — Kubernetes package manager (installs Airflow for you)
+- **kubectl** — CLI to interact with the cluster
 
 ---
 
-## Steps
+## Prerequisites
 
-### 1. Start Minikube
-
-```bash
-minikube start --cpus=2 --memory=4096
-```
-
-### 2. Create task-runner script
-
-**New file: `scripts/run_task.py`**
-
-A standalone CLI entry point containing the logic from:
-- `_generate_and_save_data` → command `generate-data`
-- `_calculate_salary_metrics_duckdb` → command `calculate-metrics`
-
-Accepts `--output` / `--input` file path arguments.
-
-### 3. Create task-runner Docker image
-
-**New file: `Dockerfile.task-runner`**
-
-- Base: `python:3.12-slim`
-- Install `faker` + `duckdb`
-- Copy `scripts/` into the image
-
-Build and load into Minikube:
+Install these before starting:
 
 ```bash
-docker build -t data-pipeline-task-runner -f Dockerfile.task-runner .
-minikube image load data-pipeline-task-runner
+# Minikube
+brew install minikube        # macOS
+# or: https://minikube.sigs.k8s.io/docs/start/
+
+# kubectl
+brew install kubectl
+
+# Helm
+brew install helm
 ```
 
-### 4. Add kubernetes provider to Airflow
-
-**File to modify: `pyproject.toml`**
-
-Add to `dependencies`:
-```
-"apache-airflow-providers-cncf-kubernetes"
-```
-
-Rebuild Airflow image:
+Verify everything works:
 ```bash
-docker compose build
+minikube version
+kubectl version --client
+helm version
 ```
 
-### 5. Give Airflow container access to Minikube API
+---
 
-**File to modify: `docker-compose.yaml`**
+## Step 1 — Start Minikube with enough resources
 
-Add volume mount:
+Airflow needs more headroom than the defaults. Give it:
+
+```bash
+minikube start \
+  --cpus=4 \
+  --memory=8192 \
+  --disk-size=20g
+```
+
+Confirm it's running:
+```bash
+kubectl get nodes
+# Should show: minikube   Ready   ...
+```
+
+> **Why this matters on GKE:** On a real cluster you'd pick a machine type (e.g. `e2-standard-4`).
+> Minikube's `--cpus` and `--memory` flags are the local equivalent.
+
+---
+
+## Step 2 — Create a namespace for Airflow
+
+Namespaces are logical partitions inside a cluster. Keeping Airflow in its own namespace
+makes it easier to manage, monitor, and eventually tear down without affecting other workloads.
+
+```bash
+kubectl create namespace airflow
+```
+
+Confirm:
+```bash
+kubectl get namespaces
+# You should see: airflow, default, kube-system, ...
+```
+
+> **Why this matters on GKE:** You'd do the exact same thing. Namespaces are a
+> first-class Kubernetes concept, not a Minikube-specific one.
+
+---
+
+## Step 3 — Add the Airflow Helm chart repository
+
+Helm uses repositories (like apt or brew) to fetch charts. Add the official Apache Airflow one:
+
+```bash
+helm repo add apache-airflow https://airflow.apache.org
+helm repo update
+```
+
+You can browse what the chart contains:
+```bash
+helm show values apache-airflow/airflow > default-values.yaml
+```
+
+That file shows every configurable option. You don't need to touch most of it yet.
+
+---
+
+## Step 4 — Create your values file
+
+Instead of modifying the default chart values directly, you override only what you need
+in your own `values.yaml`. Create this file in your project root:
+
+**`airflow-values.yaml`**
 ```yaml
-- ~/.kube:/home/airflow/.kube:ro
+# Use the KubernetesExecutor so each task runs as its own pod
+# This is the production-standard executor for cloud deployments
+executor: KubernetesExecutor
+
+# How Airflow finds your DAGs
+# For now: mount them from a local path via a PersistentVolume (see Step 6)
+dags:
+  persistence:
+    enabled: true
+    size: 1Gi
+
+# Disable the default example DAGs (optional, keeps things clean)
+env:
+  - name: AIRFLOW__CORE__LOAD_EXAMPLES
+    value: "false"
 ```
 
-Fix kubeconfig server address to use Minikube's IP (not `127.0.0.1`):
+> **KubernetesExecutor explained:** Instead of Airflow running your task functions
+> inside its own process (like PythonOperator does), it creates a fresh Kubernetes pod
+> for every task. When the task finishes, the pod is deleted. This is exactly how
+> cloud Airflow deployments (GKE, MWAA, Cloud Composer) work.
+
+---
+
+## Step 5 — Install Airflow via Helm
+
 ```bash
-minikube ip
-# Update ~/.kube/config server entry to the returned IP
+helm install airflow apache-airflow/airflow \
+  --namespace airflow \
+  --values airflow-values.yaml \
+  --debug
 ```
 
-### 6. Mount host directory for cross-task file sharing
+This will take 2–3 minutes. Watch the pods come up:
 
-Start background mount:
 ```bash
-minikube mount ./task-outputs:/opt/airflow/task-outputs &
+kubectl get pods -n airflow --watch
 ```
 
-### 7. Rewrite the DAG
+You're waiting for all pods to show `Running`:
+```
+airflow-scheduler-xxx        Running
+airflow-webserver-xxx        Running
+airflow-postgresql-xxx       Running
+airflow-statsd-xxx           Running
+```
 
-**File to modify: `dags/data-processing-dag.py`**
+If a pod is stuck in `Pending` or `CrashLoopBackOff`, check why:
+```bash
+kubectl describe pod <pod-name> -n airflow
+kubectl logs <pod-name> -n airflow
+```
 
-Replace `PythonOperator` with `KubernetesPodOperator`:
+---
+
+## Step 6 — Access the Airflow UI
+
+Kubernetes doesn't expose services to your laptop by default. Use port-forwarding:
+
+```bash
+kubectl port-forward svc/airflow-webserver 8080:8080 -n airflow
+```
+
+Now open: **http://localhost:8080**
+
+Default credentials:
+- Username: `admin`
+- Password: `admin`
+
+> **Why this matters on GKE:** On a real cluster you'd set up an Ingress with a
+> public IP and a domain name instead of port-forwarding. The underlying service
+> is identical — you're just changing how it's exposed.
+
+---
+
+## Step 7 — Build and load your task runner image
+
+Your tasks run as pods, so they need a Docker image that Minikube can access.
+
+Build the image **inside Minikube's Docker daemon** so it's immediately available
+without needing a registry:
+
+```bash
+# Point your shell's Docker CLI at Minikube's internal Docker daemon
+eval $(minikube docker-env)
+
+# Build the image (now it lives inside Minikube, not your laptop's Docker)
+docker build -t data-pipeline-task-runner:latest -f Dockerfile.task-runner .
+```
+
+Verify the image is there:
+```bash
+docker images | grep data-pipeline-task-runner
+```
+
+> **Important:** Any terminal tab that hasn't run `eval $(minikube docker-env)` is
+> still talking to your laptop's Docker. Run it in every new tab where you build images.
+
+> **Why this matters on GKE:** On a real cluster you'd push to a registry
+> (Google Artifact Registry, DockerHub, etc.) and reference it by URL.
+> The `eval` trick is the local shortcut that skips that step.
+
+---
+
+## Step 8 — Write the `run_task.py` script
+
+This is the entrypoint your pods will execute. Create `scripts/run_task.py`:
 
 ```python
-from airflow.providers.cncf.kubernetes.operators.kubernetes_pod import KubernetesPodOperator
+import argparse
 
-generate_data_task = KubernetesPodOperator(
-    task_id="generate_fake_employee_data",
-    namespace="default",
-    image="data-pipeline-task-runner:latest",
-    cmds=["python", "/scripts/run_task.py"],
-    arguments=["generate-data", "--output", "/opt/airflow/task-outputs/fake_employee_data.csv"],
-    name="generate-fake-data",
-    config_file="/home/airflow/.kube/config",
-    in_cluster=False,
-    is_delete_operator_pod=True,
-    get_logs=True,
-    volumes=[...],  # hostPath for task-outputs
-    volume_mounts=[...],
+def generate_data(output_path: str):
+    # your existing _generate_and_save_data logic here
+    pass
+
+def calculate_metrics(input_path: str, output_path: str):
+    # your existing _calculate_salary_metrics_duckdb logic here
+    pass
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+
+    gen = subparsers.add_parser("generate-data")
+    gen.add_argument("--output", required=True)
+
+    calc = subparsers.add_parser("calculate-metrics")
+    calc.add_argument("--input", required=True)
+    calc.add_argument("--output", required=True)
+
+    args = parser.parse_args()
+
+    if args.command == "generate-data":
+        generate_data(args.output)
+    elif args.command == "calculate-metrics":
+        calculate_metrics(args.input, args.output)
+```
+
+---
+
+## Step 9 — Write the Dockerfile for task pods
+
+**`Dockerfile.task-runner`**
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN pip install faker duckdb
+
+COPY scripts/ ./scripts/
+
+ENTRYPOINT ["python", "scripts/run_task.py"]
+```
+
+Rebuild after any changes:
+```bash
+eval $(minikube docker-env)
+docker build -t data-pipeline-task-runner:latest -f Dockerfile.task-runner .
+```
+
+---
+
+## Step 10 — Set up shared storage between task pods
+
+Two tasks need to share a CSV file. On GKE you'd use a PersistentVolumeClaim backed
+by a cloud disk. Locally, you'll use a `hostPath` volume (Minikube's node filesystem).
+
+Create `k8s/task-pvc.yaml`:
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: task-outputs-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteMany
+  hostPath:
+    path: /data/task-outputs   # path on the Minikube node
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: task-outputs-pvc
+  namespace: airflow
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+Apply it:
+```bash
+kubectl apply -f k8s/task-pvc.yaml
+```
+
+> **Why this matters on GKE:** You'd replace `hostPath` with a `StorageClass`
+> that provisions a GCP Persistent Disk automatically. Everything else
+> (the PVC name, how pods reference it) stays identical.
+
+---
+
+## Step 11 — Rewrite the DAG
+
+Replace `PythonOperator` with `KubernetesPodOperator`.
+
+**`dags/data-processing-dag.py`**
+```python
+from datetime import datetime
+from airflow import DAG
+from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
+from kubernetes.client import V1Volume, V1VolumeMount, V1PersistentVolumeClaimVolumeSource
+
+SHARED_VOLUME = V1Volume(
+    name="task-outputs",
+    persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(claim_name="task-outputs-pvc")
 )
+
+SHARED_MOUNT = V1VolumeMount(
+    name="task-outputs",
+    mount_path="/data/task-outputs"
+)
+
+with DAG(
+    dag_id="data_processing",
+    start_date=datetime(2024, 1, 1),
+    schedule=None,
+    catchup=False,
+) as dag:
+
+    generate_data = KubernetesPodOperator(
+        task_id="generate_fake_employee_data",
+        namespace="default",
+        image="data-pipeline-task-runner:latest",
+        image_pull_policy="Never",       # use local image, don't pull from DockerHub
+        arguments=["generate-data", "--output", "/data/task-outputs/employees.csv"],
+        name="generate-data",
+        volumes=[SHARED_VOLUME],
+        volume_mounts=[SHARED_MOUNT],
+        is_delete_operator_pod=True,
+        get_logs=True,
+    )
+
+    calculate_metrics = KubernetesPodOperator(
+        task_id="calculate_salary_metrics",
+        namespace="default",
+        image="data-pipeline-task-runner:latest",
+        image_pull_policy="Never",
+        arguments=[
+            "calculate-metrics",
+            "--input", "/data/task-outputs/employees.csv",
+            "--output", "/data/task-outputs/metrics.csv"
+        ],
+        name="calculate-metrics",
+        volumes=[SHARED_VOLUME],
+        volume_mounts=[SHARED_MOUNT],
+        is_delete_operator_pod=True,
+        get_logs=True,
+    )
+
+    generate_data >> calculate_metrics
 ```
 
-Same pattern for `calculate_salary_metrics` task (reads input CSV, writes metrics CSV).
+---
 
-Both pods mount `/opt/airflow/task-outputs` as `hostPath` (bridged via `minikube mount`).
+## Step 12 — Load your DAG into Airflow
 
-### 8. Rebuild and test
+The simplest way during development: copy the DAG file directly into the running pod.
 
 ```bash
-make build
+# Find the scheduler pod name
+kubectl get pods -n airflow | grep scheduler
+
+# Copy the DAG in
+kubectl cp dags/data-processing-dag.py \
+  airflow/<scheduler-pod-name>:/opt/airflow/dags/data-processing-dag.py
 ```
 
-Trigger the DAG from the Airflow UI, watch pods:
+Wait ~30 seconds for the scheduler to detect it, then refresh the Airflow UI.
+
+> **Better long-term approach:** Mount a PersistentVolume to `/opt/airflow/dags`
+> and sync your DAG files there. On GKE you'd use Git-sync (a sidecar container
+> that pulls from your repo automatically).
+
+---
+
+## Step 13 — Run it and watch what happens
+
+Trigger the DAG from the UI, then watch the pods appear and disappear in real time:
+
 ```bash
-kubectl get pods -w
+kubectl get pods -n default --watch
 ```
+
+You should see your task pods spin up, run, and terminate. That's the
+KubernetesExecutor in action — ephemeral pods, one per task.
+
+Check task logs directly:
+```bash
+kubectl logs <task-pod-name> -n default
+```
+
+---
+
+## Teardown
+
+When you're done for the day:
+```bash
+minikube stop
+```
+
+To wipe everything and start fresh:
+```bash
+minikube delete
+```
+
+---
+
+## What transfers directly to GKE
+
+| This setup | GKE equivalent |
+|---|---|
+| `minikube start` | Create a GKE cluster in Cloud Console |
+| `eval $(minikube docker-env)` + local build | Push image to Artifact Registry |
+| `hostPath` PersistentVolume | `StorageClass: standard` (GCP Persistent Disk) |
+| `kubectl port-forward` | Ingress with a public IP + domain |
+| `helm install` command | Identical — same command, different cluster |
+| Namespaces, PVCs, pod specs | All identical — pure Kubernetes concepts |
+
+The Helm install command and every Kubernetes manifest you write here will work
+on GKE without modification, except swapping `hostPath` for a cloud storage class
+and removing `image_pull_policy: Never`.
