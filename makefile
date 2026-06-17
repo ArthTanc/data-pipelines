@@ -1,19 +1,16 @@
-.PHONY: build run stop logs shell
+.PHONY: build up down logs shell
 
 build:
-	docker build -t airflow-test-1 .
+	docker-compose up --build
 
-run:
-	docker run -p 8080:8080 -v $(PWD)/dags:/opt/airflow/dags airflow-test-1 standalone
+up:
+	docker-compose up
 
-run-detached:
-	docker run -d -p 8080:8080 -v $(PWD)/dags:/opt/airflow/dags --name airflow airflow-test-1 standalone
-
-stop:
-	docker stop airflow && docker rm airflow
+down:
+	docker-compose down
 
 logs:
-	docker logs -f airflow
+	docker-compose logs -f
 
 shell:
-	docker exec -it airflow bash
+	docker-compose exec airflow bash
