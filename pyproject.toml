@@ -7,14 +7,20 @@ build-backend = "setuptools.build_meta"
 name = "my-airflow-project"
 version = "0.1.0"
 description = "A sample project using Airflow"
+requires-python = ">=3.12"
 dependencies = [
   "faker>=40.21.0",
-  "polars>=1.41.2",
+  "duckdb==1.5.3",
 ]
+
+[tool.setuptools.packages.find]
+exclude = ["dags*", "logs*"]
 
 [dependency-groups]
 dev = [
   "apache-airflow>=3.2.2",
+  "ipython>=9.14.1",
+  "ruff>=0.15.17",
 ]
 
 [project.urls]
